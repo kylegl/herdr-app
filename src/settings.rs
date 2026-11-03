@@ -391,6 +391,9 @@ pub struct Person {
     pub clipboard_write: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// Maximum columns in each terminal pane; absent or null leaves panes unlimited.
+    #[serde(skip_serializing_if = "Option::is_none", deserialize_with = "deserialize_pane_max_columns")]
+    pub pane_max_columns: Option<u16>,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -439,6 +442,14 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn deserialize_pane_max_columns<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u16>, D::Error> {
+    let columns = Option::<u16>::deserialize(deserializer)?;
+    if columns.is_some_and(|n| n < 2) {
+        return Err(serde::de::Error::custom("pane_max_columns must be at least 2"));
+    }
+    Ok(columns)
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -452,6 +463,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            pane_max_columns: None,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -487,6 +499,8 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
+    /// Maximum columns in each terminal pane, or no limit.
+    pub pane_max_columns: Option<u16>,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
@@ -528,6 +542,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            pane_max_columns: None,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
@@ -566,6 +581,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
+            pane_max_columns: person.pane_max_columns,
             option_as_alt: person.option_as_alt,
         }
     }
@@ -616,6 +632,9 @@ impl Settings {
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
+        }
+        if self.pane_max_columns.is_some_and(|columns| columns < 2) {
+            out.push("pane_max_columns must be at least 2".into());
         }
         out
     }
@@ -900,6 +919,30 @@ mod tests {
     }
 
     #[test]
+    fn pane_max_columns_is_optional_validated_and_preserved() {
+        for text in ["{}", r#"{"pane_max_columns":null}"#] {
+            let person: Person = serde_json::from_str(text).unwrap();
+            assert_eq!(person.pane_max_columns, None);
+            assert_eq!(Settings::compose(&person, &crate::layout::Look::default(), true).pane_max_columns, None);
+            assert!(serde_json::to_value(person).unwrap().get("pane_max_columns").is_none());
+        }
+        for columns in [2, 80, u16::MAX] {
+            let person: Person = serde_json::from_value(serde_json::json!({"pane_max_columns": columns})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.pane_max_columns, Some(columns));
+            assert!(settings.problems().is_empty());
+            assert_eq!(serde_json::to_value(person).unwrap()["pane_max_columns"], serde_json::json!(columns));
+        }
+        for columns in [0, 1] {
+            let error = serde_json::from_value::<Person>(serde_json::json!({"pane_max_columns": columns})).unwrap_err();
+            assert!(error.to_string().contains("pane_max_columns must be at least 2"));
+        }
+        for value in [serde_json::json!(-1), serde_json::json!(65536), serde_json::json!(80.5), serde_json::json!("80")] {
+            assert!(serde_json::from_value::<Person>(serde_json::json!({"pane_max_columns": value})).is_err());
+        }
+    }
+
+    #[test]
     fn program_clipboard_writes_default_on_and_can_be_disabled() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert!(default.clipboard_write);
@@ -933,7 +976,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), pane_max_columns: Some(80), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
