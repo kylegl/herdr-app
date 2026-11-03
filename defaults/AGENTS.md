@@ -630,6 +630,14 @@ What's about the user, never a look:
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
+- `pane_max_columns`: maximum width of each terminal view in columns, for
+  example `"pane_max_columns": 80`. Settings > Look offers 80 columns,
+  a custom column count and Unlimited. Omit it or set `null` for unlimited,
+  the default. Use an integer of at least 2. This applies to every terminal view, not just agents or a
+  whole tab. Splits keep their sizes and positions; a terminal wider than
+  the limit has its content centered with empty space on both sides. A
+  narrower pane simply shows fewer columns, and the setting does not cap
+  the number of tabs or rearrange splits.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same

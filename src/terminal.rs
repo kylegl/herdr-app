@@ -1,6 +1,9 @@
 //! A pane showing one core terminal: bytes in from the core, frames drawn
 //! with GPUI, keys and mouse encoded by libghostty-vt and sent back.
 
+mod viewport;
+use viewport::Viewport;
+
 use crate::hc::{Core, Stream};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
@@ -23,10 +26,7 @@ fn pad() -> (f32, f32) {
 }
 
 pub(crate) fn grid_size(bounds: Size<Pixels>, cell: Size<Pixels>) -> (u16, u16) {
-    let (px_, py_) = pad();
-    let cols = ((f32::from(bounds.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
-    let rows = ((f32::from(bounds.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
-    (cols, rows)
+    Viewport::new(Bounds::new(Point::default(), bounds), cell, pad(), crate::settings::get().pane_max_columns).dimensions
 }
 
 pub fn hsla(c: Rgb) -> Hsla {
@@ -63,6 +63,8 @@ struct Grid {
     told_display: Option<DisplayFacts>,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
+    /// Terminal surface inside the split slot, excluding optional reading-width gutters.
+    viewport: Bounds<Pixels>,
     buttons_down: Vec<MouseButton>,
     /// Kitty images uploaded for drawing, by (image, generation, source rect).
     images: HashMap<(u32, u64, [u32; 4]), Arc<RenderImage>>,
@@ -201,6 +203,7 @@ impl TerminalView {
                 vt_cell: (9, 18),
                 told_display: None,
                 origin: Point::default(),
+                viewport: Bounds::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
                 hover: None,
@@ -571,6 +574,9 @@ impl TerminalView {
     }
 
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if !self.grid.borrow().viewport.contains(&ev.position) {
+            return;
+        }
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
         let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows);
@@ -611,6 +617,10 @@ impl TerminalView {
     /// (shift keeps the mouse for Herdr: selecting, the menu).
     fn mouse(&mut self, action: GhosttyMouseAction, button: Option<MouseButton>, pos: Point<Pixels>, mods: Modifiers) -> bool {
         let mut g = self.grid.borrow_mut();
+        // A drag started in the terminal keeps its release even across a gutter.
+        if g.buttons_down.is_empty() && !g.viewport.contains(&pos) {
+            return false;
+        }
         if !track_mouse_button(&mut g.buttons_down, action, button) {
             return false;
         }
@@ -640,6 +650,9 @@ impl TerminalView {
     /// The link at a window position, and where it shows.
     fn link_at(&self, pos: Point<Pixels>) -> Option<(LinkTarget, vt::Spans)> {
         let g = self.grid.borrow();
+        if !Viewport::contains_cell(g.origin, g.cell, (g.vt.cols, g.vt.rows), pos) {
+            return None;
+        }
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
@@ -1490,6 +1503,10 @@ impl Render for TerminalView {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
+                // Gutters focus the pane, without selecting or clicking a terminal cell.
+                if !this.grid.borrow().viewport.contains(&ev.position) {
+                    return;
+                }
                 if link_mods(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
@@ -1508,13 +1525,16 @@ impl Render for TerminalView {
             // sends right-clicks to its program.
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if this.right_click_to_program && this.takes_mouse(ev.modifiers) {
+                if this.right_click_to_program && this.takes_mouse(ev.modifiers) && this.grid.borrow().viewport.contains(&ev.position) {
                     this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers);
                 } else {
                     cx.emit(TerminalEvent::ContextMenu(ev.position));
                 }
             }))
             .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+                if !this.grid.borrow().viewport.contains(&ev.position) {
+                    return;
+                }
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
                     this.paste(cx);
                 }
@@ -1537,7 +1557,9 @@ impl Render for TerminalView {
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
                         g.refresh_theme(&vt::theme(), dev);
-                        let (cols, rows) = grid_size(bounds.size, cell);
+                        let viewport = Viewport::new(bounds, cell, pad(), crate::settings::get().pane_max_columns);
+                        g.viewport = viewport.bounds;
+                        let (cols, rows) = viewport.dimensions;
                         if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
                             g.vt.resize(cols, rows, dev.0, dev.1);
                             g.vt_cell = dev;
@@ -1550,7 +1572,11 @@ impl Render for TerminalView {
                         }
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        let viewport = grid_paint.borrow().viewport;
+                        // Images and glyph overhang must not paint into the reading gutters.
+                        window.with_content_mask(Some(ContentMask { bounds: viewport }), |window| {
+                            paint_grid(viewport, &grid_paint, focused, window, cx);
+                        });
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {

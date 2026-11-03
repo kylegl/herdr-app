@@ -34,6 +34,12 @@ export default class Settings extends View {
     this.filter = "";
     this.fontInput = InputState.new({ placeholder: "Type to search fonts" });
     this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
+    this.paneColumnsInput = InputState.new({ placeholder: "Columns" });
+    this.paneColumnsInput.on("change", (_e, cx) => { this.paneColumnsError = null; cx.notify(); });
+    this.paneColumnsInput.on("submit", (_e, cx) => this.savePaneColumns(cx));
+    this.paneColumnsEditing = false;
+    this.paneColumnsPending = false;
+    this.paneColumnsError = null;
     this.renameInput = InputState.new();
     this.renameInput.on("focus", (_e, cx) => { this.renameFocused = true; cx.notify(); });
     this.renameInput.on("blur", (_e, cx) => { this.renameFocused = false; cx.notify(); });
@@ -44,6 +50,7 @@ export default class Settings extends View {
     });
     this.person = {};
     this.raw = null;
+    this.writeError = null;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
     this.showData = false;
@@ -109,18 +116,30 @@ export default class Settings extends View {
 
   // Changes settings.json the way an agent would: read, change, write back
   // only if nobody changed it meanwhile (else read again and redo).
-  change(edit, cx) {
+  change(edit, cx, onSaved) {
+    this.writeError = null;
     cx.spawn(async (cx) => {
+      let failure;
       for (let attempt = 0; attempt < 3; attempt++) {
-        await this.load();
-        const next = JSON.parse(JSON.stringify(this.person));
-        edit(next);
+        let saved = false;
         try {
+          await this.load();
+          const next = JSON.parse(JSON.stringify(this.person));
+          edit(next);
           await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
           this.person = next;
-          break;
-        } catch {}
+          saved = true;
+        } catch (e) {
+          failure = e;
+        }
+        if (saved) {
+          onSaved?.(true);
+          cx.notify();
+          return;
+        }
       }
+      this.writeError = `Couldn't save settings.json: ${String(failure)}`;
+      onSaved?.(false);
       cx.notify();
     });
   }
@@ -328,6 +347,81 @@ export default class Settings extends View {
       );
   }
 
+  savePaneColumns(cx) {
+    if (this.paneColumnsPending) return;
+    const text = this.paneColumnsInput.value().trim();
+    const columns = Number(text);
+    if (!/^\d+$/.test(text) || !Number.isInteger(columns) || columns < 2 || columns > 65535) {
+      this.paneColumnsError = "Enter a whole number from 2 to 65535.";
+      cx.notify();
+      return;
+    }
+    this.paneColumnsPending = true;
+    this.paneColumnsError = null;
+    this.change((p) => { p.pane_max_columns = columns; }, cx, (saved) => {
+      this.paneColumnsPending = false;
+      if (!this.paneColumnsEditing) return;
+      if (!saved) this.paneColumnsError = this.writeError;
+      else if (this.paneColumnsInput.value().trim() !== text) this.paneColumnsError = "Saved the previous value. Apply this edit to save it too.";
+      else {
+        this.paneColumnsEditing = false;
+        this.handle.focus();
+      }
+    });
+    cx.notify();
+  }
+
+  paneWidthPicker(t) {
+    const columns = this.person.pane_max_columns ?? null;
+    const custom = columns !== null && columns !== 80;
+    return v_flex()
+      .gap(6)
+      .items_end()
+      .child(h_flex()
+        .p(2)
+        .gap(2)
+        .rounded(8)
+        .border_1()
+        .border_color(t.border)
+        .bg(t.background)
+        .children([[null, "Unlimited"], [80, "80 columns"], ["custom", custom ? `${columns} columns` : "Custom…"]].map(([value, label]) => {
+          const on = value === "custom" ? custom : columns === value;
+          return div()
+            .id(`st-pane-width-${value ?? "unlimited"}`)
+            .px(12)
+            .py(4)
+            .rounded(6)
+            .text_size(13)
+            .cursor_pointer()
+            .when(on, (el) => el.bg(t.raised).text_color(t.foreground).border_1().border_color(t.border))
+            .when(!on, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
+            .on_click((_e, cx) => {
+              if (this.paneColumnsPending) return;
+              this.paneColumnsError = null;
+              if (value === "custom") {
+                const initial = String(columns ?? 80);
+                this.paneColumnsInput.set_value(initial);
+                this.paneColumnsInput.set_selected_range({ start: 0, end: initial.length });
+                this.paneColumnsEditing = true;
+                this.paneColumnsInput.focus();
+              } else {
+                this.paneColumnsEditing = false;
+                this.handle.focus();
+                this.change((p) => {
+                  if (value === null) delete p.pane_max_columns;
+                  else p.pane_max_columns = value;
+                }, cx);
+              }
+              cx.notify();
+            })
+            .child(label);
+        })))
+      .when(this.paneColumnsEditing, (el) => el.child(h_flex().gap(6).items_center()
+        .child(Input.new(this.paneColumnsInput).w(90).h(30).px(8).rounded(7).border_1().border_color(this.paneColumnsError ? t.blocked : t.input).bg(t.background).text_size(13).text_color(t.foreground))
+        .child(this.paneColumnsPending ? div().px(12).text_size(13).text_color(t.dim).child("Saving…") : this.button(t, "st-pane-width-apply", "Apply", (_e, cx) => this.savePaneColumns(cx)))))
+      .when(Boolean(this.paneColumnsError), (el) => el.child(div().text_size(12).text_color(t.blocked).child(this.paneColumnsError)));
+  }
+
   themePicker(t, light) {
     const s = settings();
     const current = light ? s.theme_light : s.theme_dark;
@@ -505,7 +599,10 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(this.row(t, "Maximum terminal width", p.pane_max_columns != null && p.pane_max_columns !== 80
+        ? `${p.pane_max_columns} columns. Each terminal is limited on its own.`
+        : "Each terminal is limited on its own. Wider splits leave space on both sides.", this.paneWidthPicker(t)));
   }
 
   keyboard(t) {
@@ -841,6 +938,8 @@ export default class Settings extends View {
             .on_click((_e, cx) => {
               this.section = s.id;
               this.picking = null;
+              this.paneColumnsEditing = false;
+              this.paneColumnsError = null;
               this.machineEdit = null;
               this.handle.focus();
               if (s.id === "machines") cx.spawn(async (cx) => { await this.loadMachines(); cx.notify(); });
@@ -870,7 +969,14 @@ export default class Settings extends View {
           return;
         }
         if (k === "escape") {
-          if (this.picking) this.picking = null;
+          if (this.paneColumnsPending) {
+            cx.stop_propagation();
+            return;
+          }
+          if (this.paneColumnsEditing) {
+            this.paneColumnsEditing = false;
+            this.paneColumnsError = null;
+          } else if (this.picking) this.picking = null;
           else return this.close();
           this.handle.focus();
         } else return;
@@ -897,6 +1003,8 @@ export default class Settings extends View {
                 div()
                   .px(28)
                   .py(22)
+                  .when(Boolean(this.writeError && !(this.paneColumnsEditing && this.section === "look" && this.paneColumnsError === this.writeError)), (el) =>
+                    el.child(div().pb(12).text_size(12.5).text_color(t.blocked).child(this.writeError)))
                   .child(
                     this.section === "look"
                       ? this.look(t, cx)

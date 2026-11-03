@@ -88,6 +88,12 @@ Read the generated `.d.ts` files beside it for full API details; do not edit
 those files or the generated guide. The app rewrites them on start.
 
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
+- `settings.json` `pane_max_columns` limits every terminal view separately
+  to at most that many columns, for example `80`; omit it or set `null` for
+  unlimited. Settings > Look offers 80 columns, a custom count and Unlimited.
+  The minimum is 2. Splits stay in place, with terminal content centered in the leftover
+  space; a narrower pane shrinks its columns. Tabs have no count limit from
+  this setting.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
