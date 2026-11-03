@@ -1,0 +1,9 @@
+#!/bin/sh
+# Inspect the actual destination, not just the remote's friendly name.
+case "$2" in
+  git@github.com:kylegl/herdr-app.git|https://github.com/kylegl/herdr-app.git|ssh://git@github.com/kylegl/herdr-app.git)
+    exit 0 ;;
+  *)
+    echo "Blocked: this checkout may push only to kylegl/herdr-app." >&2
+    exit 1 ;;
+esac

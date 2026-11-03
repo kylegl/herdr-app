@@ -1,0 +1,52 @@
+name: Check upstream for personal fork
+
+on:
+  schedule:
+    - cron: '23 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: personal-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  propose-update:
+    if: github.repository == 'kylegl/herdr-app'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: personal
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Propose upstream commits without changing personal
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo=kylegl/herdr-app
+          git remote add upstream https://github.com/herdrdev/herdr-app.git
+          git remote set-url --push upstream DISABLED
+          git fetch --no-tags upstream master
+          upstream=$(git rev-parse FETCH_HEAD)
+          if git merge-base --is-ancestor "$upstream" HEAD; then
+            echo 'Personal fork already contains upstream master.' | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          # No upstream checkout, build, scripts, or submodules execute with this token.
+          # A plain push fails safely if upstream ever rewrites its history.
+          gh auth setup-git
+          git push "https://github.com/$repo.git" "$upstream:refs/heads/sync/upstream"
+          url=$(gh pr list --repo "$repo" --base personal --head sync/upstream --state open --json url --jq '.[0].url // empty')
+          if [ -z "$url" ]; then
+            url=$(gh pr create --repo "$repo" --base personal --head sync/upstream \
+              --title 'chore: merge latest upstream into personal fork' \
+              --body 'Upstream master updates for the personal fork. Review conflicts and run the integration tests before merging with a merge commit. Do not squash: retain upstream ancestry. This bot-created PR does not automatically trigger GitHub Actions CI. Nothing is installed automatically. See FORK.md on personal for validation and deployment instructions.')
+          fi
+          echo "Update PR: $url" | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+case "$(git remote get-url origin)" in
+  git@github.com:kylegl/herdr-app.git|https://github.com/kylegl/herdr-app.git) ;;
+  *) echo 'Refusing setup: origin is not kylegl/herdr-app.' >&2; exit 1 ;;
+esac
+if git config --get core.hooksPath >/dev/null; then
+  echo 'An existing core.hooksPath needs manual integration.' >&2
+  exit 1
+fi
+hook=$(git rev-parse --git-path hooks/pre-push)
+if [[ -e "$hook" ]] && ! cmp -s "$source_dir/fork-pre-push" "$hook"; then
+  echo "Refusing to overwrite existing hook: $hook" >&2
+  exit 1
+fi
+mkdir -p -- "$(dirname -- "$hook")"
+cp -- "$source_dir/fork-pre-push" "$hook"
+chmod +x "$hook"
+git config --local remote.pushDefault origin
+git config --local push.default current
+git config --local --replace-all remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+git config --local remote.upstream.url https://github.com/herdrdev/herdr-app.git
+git config --local --replace-all remote.upstream.fetch '+refs/heads/*:refs/remotes/upstream/*'
+git config --local --replace-all remote.upstream.pushurl DISABLED
+git config --local alias.upstream-update '!gh workflow run fork-sync.yml --repo kylegl/herdr-app'
+gh repo set-default kylegl/herdr-app
+echo 'Fork safeguards installed. Run git upstream-update to check upstream now.'

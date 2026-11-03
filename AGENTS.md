@@ -1,3 +1,12 @@
+## Personal fork policy
+
+- This is `kylegl/herdr-app`. Never push commits, create PRs, or publish issues
+  to `herdrdev/herdr-app`. Upstream is fetch-only, even when upstream guidance
+  below says to contact its maintainer.
+- Target fork changes and update PRs at `personal`, not upstream `master`.
+- Read `FORK.md` before syncing or deploying. Preserve local uncommitted work.
+  Upstream syncs use merge commits, never squash or rebase shared history.
+
 # Herdr app
 
 The Herdr 2 desktop app (`herdr-app`): a native GPUI client of
